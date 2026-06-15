@@ -9,7 +9,7 @@ streamlit==1.44.1
 lightgbm==4.6.0
 scikit-learn==1.6.1
 imbalanced-learn==0.14.2
-shap==0.52.0
+shap>=0.45.0
 optuna==4.9.0
 pandas==2.2.3
 numpy==2.2.4
