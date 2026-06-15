@@ -1,5 +1,5 @@
 """
-Diabetes Risk Prediction API
+Multi-Disease Risk Prediction API
 รันด้วย: uvicorn api:app --reload --port 8000
 Docs:    http://localhost:8000/docs
 """
@@ -7,6 +7,7 @@ Docs:    http://localhost:8000/docs
 import os
 from fastapi import FastAPI, HTTPException, Security, Depends, Request
 from pydantic import BaseModel, Field
+from typing import Any
 from auth import LoginRequest, TokenResponse, CurrentUser
 from auth import verify_any, verify_jwt, require, create_token, pwd_context, USERS_DB
 from database import (
@@ -15,6 +16,8 @@ from database import (
     get_followups_by_patient, get_pending_followups, get_followup_stats,
 )
 from retrain import run_retrain, list_model_versions, MODELS_DIR
+from multimodel import load_all_models, preprocess_input, risk_level as get_risk_level
+from diseases import DISEASES
 import joblib
 import numpy as np
 import pandas as pd
@@ -28,96 +31,36 @@ warnings.filterwarnings("ignore")
 
 # ── สร้าง App ──────────────────────────────────────────────────
 app = FastAPI(
-    title="Diabetes Risk Prediction API",
-    description="ระบบประเมินความเสี่ยงโรคเบาหวานสำหรับโรงพยาบาล | LightGBM + Probability Calibration",
-    version="1.0.0",
+    title="Multi-Disease Risk Prediction API",
+    description="ระบบประเมินความเสี่ยงโรคสำหรับโรงพยาบาล | LightGBM + Probability Calibration",
+    version="2.0.0",
 )
 
-# ── โหลดโมเดลตอน startup (ครั้งเดียว) ────────────────────────
-FEATURE_NAMES = [
-    "Pregnancies", "Glucose", "BloodPressure", "SkinThickness",
-    "Insulin", "BMI", "DiabetesPedigree", "Age",
-]
-COLS_TO_FIX = ["Glucose", "BloodPressure", "SkinThickness", "Insulin", "BMI"]
+# ── โหลดโมเดลทุกโรคตอน startup ───────────────────────────────
+print("⏳ Loading disease models...")
+MODEL_REGISTRY: dict[str, dict] = load_all_models()
+init_db()
+print(f"✅ {len(MODEL_REGISTRY)} models ready: {list(MODEL_REGISTRY.keys())}")
 
+# backward-compat สำหรับ retrain pipeline (diabetes only)
 _CURRENT_MODEL_PATH = os.path.join(MODELS_DIR, "model_current.pkl")
-
-# state โมเดลปัจจุบัน (mutable — เพื่อ hot-reload)
-_model_state: dict = {}
-
-
-def _train_fresh() -> dict:
-    """Train จาก diabetes.csv เมื่อไม่มีไฟล์โมเดลที่บันทึกไว้"""
-    df = pd.read_csv("diabetes.csv")
-    X = df[FEATURE_NAMES].copy()
-    y = df["Outcome"].copy()
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    for d in [X_train, X_test, y_train, y_test]:
-        d.reset_index(drop=True, inplace=True)
-
-    fill_vals = {}
-    for col in COLS_TO_FIX:
-        medians = []
-        for cls in [0, 1]:
-            mask = (X_train[col] != 0) & (y_train == cls)
-            med  = X_train.loc[mask, col].median()
-            medians.append(med)
-            X_train.loc[(X_train[col] == 0) & (y_train == cls), col] = med
-        fill_vals[col] = np.mean(medians)
-    for col in COLS_TO_FIX:
-        X_test[col] = X_test[col].replace(0, np.nan).fillna(fill_vals[col])
-
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s  = scaler.transform(X_test)
-
-    scale_w = (y_train == 0).sum() / (y_train == 1).sum()
-    lgbm = lgb.LGBMClassifier(
-        n_estimators=340, learning_rate=0.019, num_leaves=10,
-        min_child_samples=22, feature_fraction=0.60,
-        bagging_fraction=0.69, bagging_freq=6,
-        scale_pos_weight=scale_w, random_state=42, verbose=-1,
-    )
-    lgbm.fit(X_train_s, y_train.values)
-    calibrated = CalibratedClassifierCV(lgbm, method="sigmoid", cv="prefit")
-    calibrated.fit(X_test_s, y_test.values)
-
-    return {
-        "model":       calibrated,
-        "scaler":      scaler,
-        "fill_vals":   fill_vals,
-        "trained_at":  "startup_fresh",
-        "n_original":  len(df),
-        "n_followup":  0,
-        "metrics":     None,
-        "feature_names": FEATURE_NAMES,
-    }
-
+_model_state: dict  = MODEL_REGISTRY.get("diabetes", {})
 
 def _load_model_state():
-    """โหลดจากไฟล์ถ้ามี ไม่งั้น train ใหม่"""
-    global _model_state
-    if os.path.exists(_CURRENT_MODEL_PATH):
-        print(f"⏳ Loading model from {_CURRENT_MODEL_PATH} ...")
-        _model_state = joblib.load(_CURRENT_MODEL_PATH)
-        print(f"✅ Model loaded  (trained_at={_model_state.get('trained_at')}, "
-              f"n_followup={_model_state.get('n_followup', 0)})")
-    else:
-        print("⏳ No saved model found — training fresh...")
-        _model_state = _train_fresh()
-        print("✅ Fresh model ready")
+    global _model_state, MODEL_REGISTRY
+    from multimodel import load_disease_model
+    state = load_disease_model("diabetes")
+    if state:
+        _model_state = state
+        MODEL_REGISTRY["diabetes"] = state
 
+# compat helpers (ใช้โดย /predict endpoint เดิม)
+FEATURE_NAMES = DISEASES["diabetes"]["features"]
+COLS_TO_FIX   = DISEASES["diabetes"]["cols_to_fix"]
 
-_load_model_state()
-init_db()
-
-# สะดวกเรียก
-def _get_model():   return _model_state["model"]
-def _get_scaler():  return _model_state["scaler"]
-def _get_fills():   return _model_state["fill_vals"]
+def _get_model():  return _model_state["model"]
+def _get_scaler(): return _model_state["scaler"]
+def _get_fills():  return _model_state["fill_vals"]
 
 
 # ── Schema ─────────────────────────────────────────────────────
@@ -194,6 +137,96 @@ def login(body: LoginRequest, request: Request):
         expires_in=8 * 3600,
         full_name=user["full_name"],
         role=user["role"],
+    )
+
+
+# ── Multi-disease Endpoints ────────────────────────────────────
+class DiseaseInput(BaseModel):
+    features: dict[str, float]
+
+class DiseaseResult(BaseModel):
+    disease:          str
+    disease_name_th:  str
+    risk_probability: float
+    risk_level:       str
+    prediction:       int
+    interpretation:   str
+
+
+@app.get("/diseases", tags=["Multi-disease"])
+def list_diseases():
+    """รายชื่อโรคทั้งหมดที่รองรับ พร้อม features และ metrics"""
+    return {
+        key: {
+            "name_th":     cfg["name_th"],
+            "name_en":     cfg["name_en"],
+            "icon":        cfg["icon"],
+            "description": cfg["description"],
+            "features":    cfg["features"],
+            "input_fields": cfg["input_fields"],
+            "metrics":     MODEL_REGISTRY.get(key, {}).get("metrics"),
+        }
+        for key, cfg in DISEASES.items()
+        if key in MODEL_REGISTRY
+    }
+
+
+@app.post("/predict/{disease}", response_model=DiseaseResult, tags=["Multi-disease"])
+def predict_disease(
+    disease: str,
+    body: DiseaseInput,
+    request: Request,
+    caller=Security(require("predict")),
+):
+    """
+    ประเมินความเสี่ยงโรคที่ระบุ
+
+    - **disease**: `diabetes` | `heart`
+    - **features**: dict ของค่า feature ตาม /diseases
+    """
+    if disease not in MODEL_REGISTRY:
+        raise HTTPException(
+            status_code=404,
+            detail=f"ไม่รองรับโรค '{disease}' — ที่รองรับ: {list(MODEL_REGISTRY.keys())}",
+        )
+
+    state = MODEL_REGISTRY[disease]
+    cfg   = DISEASES[disease]
+
+    try:
+        X    = preprocess_input(disease, body.features, state)
+        prob = float(state["model"].predict_proba(X)[0, 1])
+    except Exception as e:
+        log_action(actor=caller["id"], actor_type=caller["type"],
+                   action=f"predict_{disease}",
+                   ip_address=request.client.host, status="error", detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Prediction error: {e}")
+
+    pred       = int(prob >= 0.5)
+    rlevel     = get_risk_level(prob)
+    label      = cfg["risk_labels"].get(pred, "")
+
+    if rlevel == "สูง":
+        interpretation = f"{label} — ความเสี่ยงสูง แนะนำส่งพบแพทย์เฉพาะทางโดยด่วน"
+    elif rlevel == "กลาง":
+        interpretation = f"{label} — ความเสี่ยงปานกลาง แนะนำนัดติดตามและปรับพฤติกรรม"
+    else:
+        interpretation = f"{label} — ความเสี่ยงต่ำ แนะนำตรวจสุขภาพประจำปีตามปกติ"
+
+    log_action(
+        actor=caller["id"], actor_type=caller["type"],
+        action=f"predict_{disease}",
+        input_data=body.features,
+        risk_prob=round(prob, 4), risk_level=rlevel, prediction=pred,
+        ip_address=request.client.host,
+    )
+    return DiseaseResult(
+        disease=disease,
+        disease_name_th=cfg["name_th"],
+        risk_probability=round(prob, 4),
+        risk_level=rlevel,
+        prediction=pred,
+        interpretation=interpretation,
     )
 
 
