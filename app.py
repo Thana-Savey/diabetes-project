@@ -308,10 +308,11 @@ with tab2:
                     include_shap = st.checkbox("รวม SHAP chart", value=True,
                                                key=f"shap_{selected_id}")
 
+                pdf_key = f"pdf_bytes_{selected_id}"
+
                 if st.button("📄 สร้าง PDF Report", type="primary",
-                             key=f"pdf_{selected_id}"):
+                             key=f"pdf_btn_{selected_id}"):
                     with st.spinner("กำลังสร้าง PDF..."):
-                        # SHAP values สำหรับใส่ใน PDF
                         sv = None
                         fn = None
                         if include_shap:
@@ -323,19 +324,22 @@ with tab2:
                         fu_df = get_followups_by_patient(selected_id)
                         fu_records = fu_df.to_dict("records") if not fu_df.empty else []
 
-                        pdf_bytes = generate_report(
+                        st.session_state[pdf_key] = generate_report(
                             patient=patient,
                             shap_values=sv,
                             feature_names=fn,
                             followup_records=fu_records,
                             printed_by=printed_by,
                         )
+                    st.success("PDF พร้อมแล้ว — กด Download ด้านล่าง")
 
-                    hn   = patient.get("hn") or f"patient_{selected_id}"
+                # download_button อยู่นอก if-button จึงคงอยู่หลัง rerun
+                if st.session_state.get(pdf_key):
+                    hn    = patient.get("hn") or f"patient_{selected_id}"
                     fname = f"diabetes_report_{hn}_{datetime.now().strftime('%Y%m%d')}.pdf"
                     st.download_button(
                         label="⬇️ Download PDF",
-                        data=pdf_bytes,
+                        data=st.session_state[pdf_key],
                         file_name=fname,
                         mime="application/pdf",
                         type="primary",
