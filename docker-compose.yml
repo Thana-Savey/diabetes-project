@@ -1,0 +1,70 @@
+services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: diabetes-db
+    environment:
+      POSTGRES_DB:       diabetes
+      POSTGRES_USER:     hospital
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hospital -d diabetes"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI ───────────────────────────────────────────────────
+  api:
+    build: .
+    container_name: diabetes-api
+    command: uvicorn api:app --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgresql://hospital:${DB_PASSWORD:-changeme}@db:5432/diabetes
+      SECRET_KEY:   ${SECRET_KEY:-CHANGE-ME-IN-PRODUCTION}
+      API_KEYS:     ${API_KEYS:-his-system-key-abc123,lab-system-key-xyz789}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── Streamlit ─────────────────────────────────────────────────
+  streamlit:
+    build: .
+    container_name: diabetes-ui
+    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+    environment:
+      DATABASE_URL: postgresql://hospital:${DB_PASSWORD:-changeme}@db:5432/diabetes
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Nginx (HTTPS + Reverse Proxy) ────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: diabetes-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8443:8443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+      - streamlit
+    restart: unless-stopped
+
+volumes:
+  pg-data:    # PostgreSQL data (persistent)

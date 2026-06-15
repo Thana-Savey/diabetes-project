@@ -1,0 +1,18 @@
+# Git
+.git
+.gitignore
+
+# Notebooks & dev files
+*.ipynb
+*.py.bak
+__pycache__/
+*.pyc
+
+# Output images
+*.png
+
+# Local DB (จะสร้างใหม่ใน volume)
+patients.db
+
+# Trained artifacts (โมเดล train ใน container)
+*.pkl
