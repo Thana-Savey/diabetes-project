@@ -265,85 +265,86 @@ with tab2:
             selected_idx   = patient_names.index(selected_label)
             selected_id    = patient_ids[selected_idx]
 
+        # เก็บ patient ที่เลือกใน session_state เพื่อให้ข้อมูลคงอยู่ข้าม rerun
         if st.button("📊 ดูผลและ SHAP", type="primary"):
-            patient = get_patient_by_id(selected_id)
-            if patient:
-                with detail_col2:
-                    st.markdown(f"**{patient['name']}** | HN: `{patient['hn'] or '-'}` | อายุ {patient['age']} ปี")
-                    if patient['note']:
-                        st.caption(f"📝 {patient['note']}")
-
+            p = get_patient_by_id(selected_id)
+            if p:
                 raw = dict(
-                    Pregnancies=patient["pregnancies"],
-                    Glucose=patient["glucose"],
-                    BloodPressure=patient["blood_pressure"],
-                    SkinThickness=patient["skin_thickness"],
-                    Insulin=patient["insulin"],
-                    BMI=patient["bmi"],
-                    DiabetesPedigree=patient["diabetes_pedigree"],
-                    Age=patient["age"],
+                    Pregnancies=p["pregnancies"], Glucose=p["glucose"],
+                    BloodPressure=p["blood_pressure"], SkinThickness=p["skin_thickness"],
+                    Insulin=p["insulin"], BMI=p["bmi"],
+                    DiabetesPedigree=p["diabetes_pedigree"], Age=p["age"],
                 )
                 df_raw, df_scaled = preprocess(raw)
+                shap_vals = explainer.shap_values(df_scaled)
+                sv = shap_vals[1][0] if isinstance(shap_vals, list) else shap_vals[0]
+                st.session_state["view_patient"]      = p
+                st.session_state["view_df_raw"]       = df_raw
+                st.session_state["view_df_scaled"]    = df_scaled
+                st.session_state["view_shap"]         = sv
+                st.session_state["view_patient_id"]   = selected_id
+                st.session_state.pop("pdf_bytes", None)   # reset PDF เมื่อเปลี่ยนคนไข้
 
-                show_prediction_result(
-                    patient["risk_prob"],
-                    patient["prediction"],
-                    patient["risk_level"],
-                    df_raw, df_scaled,
-                )
+        # แสดงผลจาก session_state — คงอยู่แม้ rerun
+        if st.session_state.get("view_patient"):
+            patient    = st.session_state["view_patient"]
+            df_raw     = st.session_state["view_df_raw"]
+            df_scaled  = st.session_state["view_df_scaled"]
+            sv         = st.session_state["view_shap"]
 
-                with st.expander("📋 ข้อมูลทางการแพทย์ทั้งหมด"):
-                    info_df = pd.DataFrame([raw]).T
-                    info_df.columns = ["ค่า"]
-                    st.dataframe(info_df, use_container_width=True)
+            with detail_col2:
+                st.markdown(f"**{patient['name']}** | HN: `{patient['hn'] or '-'}` | อายุ {patient['age']} ปี")
+                if patient['note']:
+                    st.caption(f"📝 {patient['note']}")
 
-                # ── Export PDF ────────────────────────────────
-                st.markdown("---")
-                st.markdown("#### 📄 Export PDF Report")
-                col_pdf1, col_pdf2 = st.columns([1, 3])
-                with col_pdf1:
-                    printed_by = st.text_input("พิมพ์โดย (แพทย์)", value="dr.somchai",
-                                               key=f"printed_by_{selected_id}")
-                with col_pdf2:
-                    include_shap = st.checkbox("รวม SHAP chart", value=True,
-                                               key=f"shap_{selected_id}")
+            show_prediction_result(
+                patient["risk_prob"], patient["prediction"],
+                patient["risk_level"], df_raw, df_scaled,
+            )
 
-                pdf_key = f"pdf_bytes_{selected_id}"
+            with st.expander("📋 ข้อมูลทางการแพทย์ทั้งหมด"):
+                info_df = pd.DataFrame([{k: v for k, v in df_raw.iloc[0].items()}]).T
+                info_df.columns = ["ค่า"]
+                st.dataframe(info_df, use_container_width=True)
 
-                if st.button("📄 สร้าง PDF Report", type="primary",
-                             key=f"pdf_btn_{selected_id}"):
-                    with st.spinner("กำลังสร้าง PDF..."):
-                        sv = None
-                        fn = None
-                        if include_shap:
-                            shap_vals = explainer.shap_values(df_scaled)
-                            sv = (shap_vals[1][0] if isinstance(shap_vals, list)
-                                  else shap_vals[0])
-                            fn = FEATURE_NAMES
+            # ── Export PDF ────────────────────────────────────
+            st.markdown("---")
+            st.markdown("#### 📄 Export PDF Report")
+            col_pdf1, col_pdf2 = st.columns([1, 3])
+            with col_pdf1:
+                printed_by = st.text_input("พิมพ์โดย (แพทย์)", value="dr.somchai",
+                                           key="printed_by_input")
+            with col_pdf2:
+                include_shap = st.checkbox("รวม SHAP chart", value=True, key="include_shap")
 
-                        fu_df = get_followups_by_patient(selected_id)
-                        fu_records = fu_df.to_dict("records") if not fu_df.empty else []
-
-                        st.session_state[pdf_key] = generate_report(
-                            patient=patient,
-                            shap_values=sv,
-                            feature_names=fn,
-                            followup_records=fu_records,
-                            printed_by=printed_by,
-                        )
-                    st.success("PDF พร้อมแล้ว — กด Download ด้านล่าง")
-
-                # download_button อยู่นอก if-button จึงคงอยู่หลัง rerun
-                if st.session_state.get(pdf_key):
-                    hn    = patient.get("hn") or f"patient_{selected_id}"
-                    fname = f"diabetes_report_{hn}_{datetime.now().strftime('%Y%m%d')}.pdf"
-                    st.download_button(
-                        label="⬇️ Download PDF",
-                        data=st.session_state[pdf_key],
-                        file_name=fname,
-                        mime="application/pdf",
-                        type="primary",
+            if st.button("📄 สร้าง PDF Report", type="primary", key="gen_pdf"):
+                with st.spinner("กำลังสร้าง PDF..."):
+                    fu_df = get_followups_by_patient(st.session_state["view_patient_id"])
+                    fu_records = fu_df.to_dict("records") if not fu_df.empty else []
+                    st.session_state["pdf_bytes"] = generate_report(
+                        patient=patient,
+                        shap_values=sv if include_shap else None,
+                        feature_names=FEATURE_NAMES if include_shap else None,
+                        followup_records=fu_records,
+                        printed_by=printed_by,
                     )
+                    hn = patient.get("hn") or f"patient_{st.session_state['view_patient_id']}"
+                    st.session_state["pdf_filename"] = (
+                        f"diabetes_report_{hn}_{datetime.now().strftime('%Y%m%d')}.pdf"
+                    )
+
+            # ใช้ base64 href แทน st.download_button เพื่อหลีกเลี่ยง rerun loop
+            if st.session_state.get("pdf_bytes"):
+                import base64
+                b64 = base64.b64encode(st.session_state["pdf_bytes"]).decode()
+                fname = st.session_state.get("pdf_filename", "report.pdf")
+                st.markdown(
+                    f'<a href="data:application/pdf;base64,{b64}" download="{fname}" '
+                    f'style="display:inline-block;padding:10px 22px;background:#1D9E75;'
+                    f'color:white;border-radius:8px;text-decoration:none;font-weight:bold;'
+                    f'font-size:15px;">⬇️ Download PDF</a>',
+                    unsafe_allow_html=True,
+                )
 
 
 # ──────────────────────────────────────────────────────────────
