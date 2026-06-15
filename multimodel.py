@@ -135,8 +135,16 @@ def load_all_models(force_retrain: bool = False) -> dict[str, dict]:
                 registry[key] = state
                 continue
 
+        csv_path = DISEASES[key].get("csv", "")
+        if not os.path.exists(csv_path):
+            print(f"  ⚠️  {key}: CSV not found ({csv_path}) — skipping")
+            continue
         print(f"  ⏳ {key}: training...")
-        state = train_disease(key)
+        try:
+            state = train_disease(key)
+        except Exception as e:
+            print(f"  ❌ {key}: training failed — {e}")
+            continue
         save_disease_model(key, state)
         print(f"  ✅ {key}: trained  "
               f"AUC={state['metrics']['auc']}  "
