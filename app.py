@@ -6,6 +6,7 @@ Diabetes Risk Prediction App
 import streamlit as st
 import pandas as pd
 import numpy as np
+from datetime import datetime
 import matplotlib.pyplot as plt
 import lightgbm as lgb
 import shap
@@ -17,6 +18,7 @@ from database import (
     schedule_followup, complete_followup,
     get_followups_by_patient, get_pending_followups, get_followup_stats,
 )
+from report import generate_report
 
 warnings.filterwarnings("ignore")
 
@@ -294,6 +296,50 @@ with tab2:
                     info_df = pd.DataFrame([raw]).T
                     info_df.columns = ["ค่า"]
                     st.dataframe(info_df, use_container_width=True)
+
+                # ── Export PDF ────────────────────────────────
+                st.markdown("---")
+                st.markdown("#### 📄 Export PDF Report")
+                col_pdf1, col_pdf2 = st.columns([1, 3])
+                with col_pdf1:
+                    printed_by = st.text_input("พิมพ์โดย (แพทย์)", value="dr.somchai",
+                                               key=f"printed_by_{selected_id}")
+                with col_pdf2:
+                    include_shap = st.checkbox("รวม SHAP chart", value=True,
+                                               key=f"shap_{selected_id}")
+
+                if st.button("📄 สร้าง PDF Report", type="primary",
+                             key=f"pdf_{selected_id}"):
+                    with st.spinner("กำลังสร้าง PDF..."):
+                        # SHAP values สำหรับใส่ใน PDF
+                        sv = None
+                        fn = None
+                        if include_shap:
+                            shap_vals = explainer.shap_values(df_scaled)
+                            sv = (shap_vals[1][0] if isinstance(shap_vals, list)
+                                  else shap_vals[0])
+                            fn = FEATURE_NAMES
+
+                        fu_df = get_followups_by_patient(selected_id)
+                        fu_records = fu_df.to_dict("records") if not fu_df.empty else []
+
+                        pdf_bytes = generate_report(
+                            patient=patient,
+                            shap_values=sv,
+                            feature_names=fn,
+                            followup_records=fu_records,
+                            printed_by=printed_by,
+                        )
+
+                    hn   = patient.get("hn") or f"patient_{selected_id}"
+                    fname = f"diabetes_report_{hn}_{datetime.now().strftime('%Y%m%d')}.pdf"
+                    st.download_button(
+                        label="⬇️ Download PDF",
+                        data=pdf_bytes,
+                        file_name=fname,
+                        mime="application/pdf",
+                        type="primary",
+                    )
 
 
 # ──────────────────────────────────────────────────────────────
