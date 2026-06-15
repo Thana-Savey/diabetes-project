@@ -171,6 +171,34 @@ def list_diseases():
     }
 
 
+
+
+@app.post("/predict/batch", tags=["Prediction"])
+def predict_batch(patients: list[PatientData], caller=Security(require("predict"))):
+    """
+    ประเมินความเสี่ยงหลายคนพร้อมกัน (สำหรับ batch processing จาก HIS)
+
+    รับ list ของผู้ป่วย → คืน list ของผลลัพธ์
+    """
+    if len(patients) > 1000:
+        raise HTTPException(status_code=400, detail="Batch size ต้องไม่เกิน 1,000 รายการ")
+    results = []
+    for patient in patients:
+        try:
+            X = preprocess(patient)
+            prob = float(_get_model().predict_proba(X)[0, 1])
+            prediction = int(prob >= 0.5)
+            risk_level = "สูง" if prob >= 0.7 else "กลาง" if prob >= 0.4 else "ต่ำ"
+            results.append({
+                "risk_probability": round(prob, 4),
+                "risk_level": risk_level,
+                "prediction": prediction,
+            })
+        except Exception as e:
+            results.append({"error": str(e)})
+    return {"total": len(patients), "results": results}
+
+
 @app.post("/predict/{disease}", response_model=DiseaseResult, tags=["Multi-disease"])
 def predict_disease(
     disease: str,
@@ -416,27 +444,3 @@ def patient_followups(patient_id: int, caller=Security(require("followup:read"))
     return {"patient_id": patient_id, "total": len(df), "followups": df.to_dict("records")}
 
 
-@app.post("/predict/batch", tags=["Prediction"])
-def predict_batch(patients: list[PatientData], caller=Security(require("predict"))):
-    """
-    ประเมินความเสี่ยงหลายคนพร้อมกัน (สำหรับ batch processing จาก HIS)
-
-    รับ list ของผู้ป่วย → คืน list ของผลลัพธ์
-    """
-    if len(patients) > 1000:
-        raise HTTPException(status_code=400, detail="Batch size ต้องไม่เกิน 1,000 รายการ")
-    results = []
-    for patient in patients:
-        try:
-            X = preprocess(patient)
-            prob = float(_get_model().predict_proba(X)[0, 1])
-            prediction = int(prob >= 0.5)
-            risk_level = "สูง" if prob >= 0.7 else "กลาง" if prob >= 0.4 else "ต่ำ"
-            results.append({
-                "risk_probability": round(prob, 4),
-                "risk_level": risk_level,
-                "prediction": prediction,
-            })
-        except Exception as e:
-            results.append({"error": str(e)})
-    return {"total": len(patients), "results": results}
