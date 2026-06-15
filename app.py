@@ -201,12 +201,13 @@ with tab1:
         field_values: dict[str, float] = {}
         for i, f in enumerate(fields_input):
             with cols[i % n_cols]:
+                cast = int if f["fmt"] == "%d" else float
                 val = st.number_input(
                     f["label"],
-                    min_value=float(f["min"]),
-                    max_value=float(f["max"]),
-                    value=float(f["default"]),
-                    step=float(f["step"]),
+                    min_value=cast(f["min"]),
+                    max_value=cast(f["max"]),
+                    value=cast(f["default"]),
+                    step=cast(f["step"]),
                     format=f["fmt"],
                     key=f"field_{f['key']}",
                 )
