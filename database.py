@@ -41,10 +41,24 @@ Base   = declarative_base()
 class Patient(Base):
     __tablename__ = "patients"
 
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    hn         = Column(String(50))
+    name       = Column(String(200), nullable=False)
+    age        = Column(Integer)
+    created_at = Column(DateTime, server_default=func.now())
+
+    assessments = relationship("Assessment", back_populates="patient",
+                               order_by="desc(Assessment.created_at)")
+    followups   = relationship("FollowUp", back_populates="patient")
+
+
+class Assessment(Base):
+    __tablename__ = "assessments"
+
     id                = Column(Integer, primary_key=True, autoincrement=True)
-    hn                = Column(String(50))
-    name              = Column(String(200), nullable=False)
-    age               = Column(Integer)
+    patient_id        = Column(Integer, ForeignKey("patients.id"), nullable=False)
+    disease           = Column(String(50), nullable=False, default="diabetes")
+    features_json     = Column(Text)
     pregnancies       = Column(Float)
     glucose           = Column(Float)
     blood_pressure    = Column(Float)
@@ -52,14 +66,13 @@ class Patient(Base):
     insulin           = Column(Float)
     bmi               = Column(Float)
     diabetes_pedigree = Column(Float)
-    disease           = Column(String(50))   # disease key: "diabetes","heart","stroke", ...
-    features_json     = Column(Text)         # JSON: {"key": value, ...} ค่าสำคัญของแต่ละโรค
     risk_prob         = Column(Float)
     risk_level        = Column(String(10))
     prediction        = Column(Integer)
     note              = Column(Text)
     created_at        = Column(DateTime, server_default=func.now())
-    followups         = relationship("FollowUp", back_populates="patient")
+
+    patient = relationship("Patient", back_populates="assessments")
 
 
 class FollowUp(Base):
@@ -67,12 +80,11 @@ class FollowUp(Base):
 
     id              = Column(Integer, primary_key=True, autoincrement=True)
     patient_id      = Column(Integer, ForeignKey("patients.id"), nullable=False)
-    scheduled_date  = Column(String(20), nullable=False)   # วันที่นัด
-    actual_date     = Column(String(20))                   # วันที่มาจริง
+    scheduled_date  = Column(String(20), nullable=False)
+    actual_date     = Column(String(20))
     status          = Column(String(20), nullable=False, default="scheduled")
-                     # scheduled / completed / missed / cancelled
-    actual_outcome  = Column(Integer)                      # 0/1 หรือ None ถ้ายังไม่รู้
-    glucose_new     = Column(Float)                        # ค่า glucose ตอน follow-up
+    actual_outcome  = Column(Integer)
+    glucose_new     = Column(Float)
     bmi_new         = Column(Float)
     note            = Column(Text)
     created_by      = Column(String(100))
@@ -110,6 +122,56 @@ def _add_col_if_missing(table: str, col: str, col_type: str) -> None:
             pass  # column already exists
 
 
+def _migrate_to_assessments():
+    """Create assessments table and copy existing patient assessment data."""
+    Assessment.__table__.create(engine, checkfirst=True)
+
+    with engine.connect() as conn:
+        try:
+            result = conn.execute(text(
+                "SELECT id, hn, name, age, disease, features_json, "
+                "pregnancies, glucose, blood_pressure, skin_thickness, "
+                "insulin, bmi, diabetes_pedigree, risk_prob, risk_level, "
+                "prediction, note, created_at FROM patients WHERE risk_prob IS NOT NULL"
+            )).fetchall()
+        except Exception:
+            return  # table doesn't have old columns, already migrated
+
+        for row in result:
+            row = row._asdict() if hasattr(row, '_asdict') else dict(row._mapping)
+            existing = conn.execute(text(
+                "SELECT id FROM assessments WHERE patient_id = :pid LIMIT 1"
+            ), {"pid": row["id"]}).fetchone()
+            if existing:
+                continue
+            conn.execute(text("""
+                INSERT INTO assessments
+                (patient_id, disease, features_json, pregnancies, glucose, blood_pressure,
+                 skin_thickness, insulin, bmi, diabetes_pedigree, risk_prob, risk_level,
+                 prediction, note, created_at)
+                VALUES (:patient_id, :disease, :features_json, :pregnancies, :glucose,
+                 :blood_pressure, :skin_thickness, :insulin, :bmi, :diabetes_pedigree,
+                 :risk_prob, :risk_level, :prediction, :note, :created_at)
+            """), {
+                "patient_id":        row["id"],
+                "disease":           row.get("disease") or "diabetes",
+                "features_json":     row.get("features_json"),
+                "pregnancies":       row.get("pregnancies"),
+                "glucose":           row.get("glucose"),
+                "blood_pressure":    row.get("blood_pressure"),
+                "skin_thickness":    row.get("skin_thickness"),
+                "insulin":           row.get("insulin"),
+                "bmi":               row.get("bmi"),
+                "diabetes_pedigree": row.get("diabetes_pedigree"),
+                "risk_prob":         row.get("risk_prob"),
+                "risk_level":        row.get("risk_level"),
+                "prediction":        row.get("prediction"),
+                "note":              row.get("note"),
+                "created_at":        row.get("created_at"),
+            })
+        conn.commit()
+
+
 # ── Init ───────────────────────────────────────────────────────
 def init_db():
     """สร้างตารางทั้งหมดถ้ายังไม่มี และ migrate columns ใหม่"""
@@ -118,9 +180,10 @@ def init_db():
 
 
 def _migrate():
-    """เพิ่ม column ใหม่สำหรับ DB เก่าที่ยังไม่มี"""
+    """เพิ่ม column ใหม่สำหรับ DB เก่าที่ยังไม่มี และย้ายข้อมูลไป assessments"""
     _add_col_if_missing("patients", "disease",       "VARCHAR(50)")
     _add_col_if_missing("patients", "features_json", "TEXT")
+    _migrate_to_assessments()
 
 
 # ── Audit Log ──────────────────────────────────────────────────
@@ -202,65 +265,150 @@ def get_audit_summary() -> dict:
 
 
 # ── Patients ───────────────────────────────────────────────────
-def save_patient(data: dict) -> int:
+def get_or_create_patient(hn: str | None, name: str, age: int) -> int:
+    """Find patient by HN (if provided) or create new. Returns patient_id."""
     with Session(engine) as session:
-        p = Patient(**{k: data.get(k) for k in [
-            "hn","name","age","disease","features_json","pregnancies","glucose",
-            "blood_pressure","skin_thickness","insulin","bmi","diabetes_pedigree",
-            "risk_prob","risk_level","prediction","note"
-        ]})
+        if hn:
+            existing = session.query(Patient).filter(Patient.hn == hn).first()
+            if existing:
+                if existing.name != name or existing.age != age:
+                    existing.name = name
+                    existing.age  = age
+                    session.commit()
+                return existing.id
+        p = Patient(hn=hn or None, name=name, age=age)
         session.add(p)
         session.commit()
         session.refresh(p)
         return p.id
 
 
-def search_patients(query: str) -> pd.DataFrame:
-    q = f"%{query.strip()}%"
+def save_assessment(patient_id: int, data: dict) -> int:
+    """Save one disease assessment for a patient. Returns assessment_id."""
     with Session(engine) as session:
-        rows = session.query(Patient).filter(
-            (Patient.name.ilike(q)) | (Patient.hn.ilike(q))
-        ).order_by(Patient.created_at.desc()).all()
-    return _patients_to_df(rows)
+        a = Assessment(**{k: data.get(k) for k in [
+            "disease", "features_json", "pregnancies", "glucose",
+            "blood_pressure", "skin_thickness", "insulin", "bmi", "diabetes_pedigree",
+            "risk_prob", "risk_level", "prediction", "note"
+        ]})
+        a.patient_id = patient_id
+        session.add(a)
+        session.commit()
+        session.refresh(a)
+        return a.id
+
+
+def save_patient(data: dict) -> int:
+    """Backward-compat: get/create patient + save assessment. Returns patient_id."""
+    patient_id = get_or_create_patient(
+        hn=data.get("hn"), name=data["name"], age=data.get("age", 0)
+    )
+    save_assessment(patient_id, data)
+    return patient_id
 
 
 def get_patient_by_id(pid: int) -> dict | None:
+    """Returns patient identity + latest assessment merged (backward compat)."""
     with Session(engine) as session:
         p = session.get(Patient, pid)
         if p is None:
             return None
-        return {c.name: getattr(p, c.name) for c in Patient.__table__.columns}
+        result = {
+            "id": p.id, "hn": p.hn, "name": p.name,
+            "age": p.age, "created_at": p.created_at,
+        }
+        latest = session.query(Assessment).filter(
+            Assessment.patient_id == pid
+        ).order_by(Assessment.created_at.desc()).first()
+        if latest:
+            for col in Assessment.__table__.columns:
+                if col.name not in ("id", "patient_id"):
+                    result[col.name] = getattr(latest, col.name)
+        return result
+
+
+def get_assessments_by_patient(patient_id: int) -> pd.DataFrame:
+    """All assessments for one patient, newest first."""
+    with Session(engine) as session:
+        rows = session.query(Assessment).filter(
+            Assessment.patient_id == patient_id
+        ).order_by(Assessment.created_at.desc()).all()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame([{
+        "id": a.id, "disease": a.disease, "features_json": a.features_json,
+        "glucose": a.glucose, "bmi": a.bmi, "risk_prob": a.risk_prob,
+        "risk_level": a.risk_level, "prediction": a.prediction,
+        "note": a.note, "created_at": a.created_at,
+    } for a in rows])
 
 
 def get_all_patients() -> pd.DataFrame:
+    """One row per patient. Aggregates diseases from assessments."""
     with Session(engine) as session:
-        rows = session.query(Patient).order_by(Patient.created_at.desc()).all()
-    return _patients_to_df(rows)
+        patients = session.query(Patient).order_by(Patient.created_at.desc()).all()
+        result = []
+        for p in patients:
+            assessments = session.query(Assessment).filter(
+                Assessment.patient_id == p.id
+            ).order_by(Assessment.created_at.desc()).all()
+            diseases  = list(dict.fromkeys(a.disease for a in assessments if a.disease))
+            latest    = assessments[0] if assessments else None
+            worst     = max(assessments, key=lambda a: a.risk_prob or 0) if assessments else None
+            result.append({
+                "id":             p.id,
+                "hn":             p.hn,
+                "name":           p.name,
+                "age":            p.age,
+                "diseases":       diseases,
+                "n_assessments":  len(assessments),
+                "risk_prob":      worst.risk_prob if worst else None,
+                "risk_level":     worst.risk_level if worst else None,
+                "prediction":     1 if any(a.prediction == 1 for a in assessments) else 0,
+                "latest_disease": latest.disease if latest else None,
+                "disease":        latest.disease if latest else None,
+                "features_json":  latest.features_json if latest else None,
+                "glucose":        latest.glucose if latest else None,
+                "bmi":            latest.bmi if latest else None,
+                "note":           latest.note if latest else None,
+                "created_at":     p.created_at,
+            })
+    return pd.DataFrame(result) if result else pd.DataFrame()
 
 
-def _patients_to_df(rows) -> pd.DataFrame:
-    def _disease(r):
-        # backward compat: old rows have disease=None → parse from note or default diabetes
-        if getattr(r, "disease", None):
-            return r.disease
-        note = r.note or ""
-        if note.startswith("[") and "]" in note:
-            # format "[โรคหลอดเลือดสมอง] ..."
-            return None   # keep None, resolved to label in app.py
-        return "diabetes"
-
-    return pd.DataFrame([{
-        "id": r.id, "hn": r.hn, "name": r.name, "age": r.age,
-        "disease":       _disease(r),
-        "features_json": getattr(r, "features_json", None),
-        "glucose":       r.glucose,
-        "bmi":           r.bmi,
-        "risk_prob":     r.risk_prob,
-        "risk_level":    r.risk_level,
-        "prediction":    r.prediction,
-        "note":          r.note,
-        "created_at":    r.created_at,
-    } for r in rows])
+def search_patients(query: str) -> pd.DataFrame:
+    q = f"%{query.strip()}%"
+    with Session(engine) as session:
+        patients = session.query(Patient).filter(
+            (Patient.name.ilike(q)) | (Patient.hn.ilike(q))
+        ).order_by(Patient.created_at.desc()).all()
+        result = []
+        for p in patients:
+            assessments = session.query(Assessment).filter(
+                Assessment.patient_id == p.id
+            ).order_by(Assessment.created_at.desc()).all()
+            diseases = list(dict.fromkeys(a.disease for a in assessments if a.disease))
+            latest   = assessments[0] if assessments else None
+            worst    = max(assessments, key=lambda a: a.risk_prob or 0) if assessments else None
+            result.append({
+                "id":             p.id,
+                "hn":             p.hn,
+                "name":           p.name,
+                "age":            p.age,
+                "diseases":       diseases,
+                "n_assessments":  len(assessments),
+                "risk_prob":      worst.risk_prob if worst else None,
+                "risk_level":     worst.risk_level if worst else None,
+                "prediction":     1 if any(a.prediction == 1 for a in assessments) else 0,
+                "latest_disease": latest.disease if latest else None,
+                "disease":        latest.disease if latest else None,
+                "features_json":  latest.features_json if latest else None,
+                "glucose":        latest.glucose if latest else None,
+                "bmi":            latest.bmi if latest else None,
+                "note":           latest.note if latest else None,
+                "created_at":     p.created_at,
+            })
+    return pd.DataFrame(result) if result else pd.DataFrame()
 
 
 def seed_demo_data():
@@ -269,23 +417,23 @@ def seed_demo_data():
             return
 
     demos = [
-        dict(hn="HN-0001", name="สมชาย ใจดี",    age=52,
+        dict(hn="HN-0001", name="สมชาย ใจดี", age=52, disease="diabetes",
              pregnancies=0, glucose=148, blood_pressure=72, skin_thickness=35,
              insulin=0, bmi=33.6, diabetes_pedigree=0.627,
              risk_prob=0.92, risk_level="สูง", prediction=1, note="ส่งต่อแพทย์เฉพาะทาง"),
-        dict(hn="HN-0002", name="สมหญิง รักสุข", age=31,
-             pregnancies=1, glucose=85,  blood_pressure=66, skin_thickness=29,
+        dict(hn="HN-0002", name="สมหญิง รักสุข", age=31, disease="diabetes",
+             pregnancies=1, glucose=85, blood_pressure=66, skin_thickness=29,
              insulin=0, bmi=26.6, diabetes_pedigree=0.351,
              risk_prob=0.06, risk_level="ต่ำ", prediction=0, note=""),
-        dict(hn="HN-0003", name="วิชัย มั่นคง",  age=45,
+        dict(hn="HN-0003", name="วิชัย มั่นคง", age=45, disease="diabetes",
              pregnancies=0, glucose=120, blood_pressure=70, skin_thickness=30,
              insulin=0, bmi=30.0, diabetes_pedigree=0.500,
              risk_prob=0.52, risk_level="กลาง", prediction=1, note="นัดติดตาม 3 เดือน"),
-        dict(hn="HN-0004", name="มาลี สุขใส",    age=38,
+        dict(hn="HN-0004", name="มาลี สุขใส", age=38, disease="diabetes",
              pregnancies=3, glucose=110, blood_pressure=68, skin_thickness=25,
              insulin=140, bmi=27.5, diabetes_pedigree=0.320,
              risk_prob=0.28, risk_level="ต่ำ", prediction=0, note=""),
-        dict(hn="HN-0005", name="ประยุทธ์ ขยัน", age=60,
+        dict(hn="HN-0005", name="ประยุทธ์ ขยัน", age=60, disease="diabetes",
              pregnancies=0, glucose=175, blood_pressure=88, skin_thickness=40,
              insulin=0, bmi=38.2, diabetes_pedigree=0.810,
              risk_prob=0.97, risk_level="สูง", prediction=1, note="รับยาแล้ว"),
@@ -350,8 +498,8 @@ def get_followups_by_patient(patient_id: int) -> pd.DataFrame:
 def get_pending_followups(days_ahead: int = 30) -> pd.DataFrame:
     """คืนนัดที่ยังไม่ได้ติดตาม (scheduled) และนัดที่เลยกำหนดแล้ว (missed)"""
     from datetime import date, timedelta
-    today     = date.today().isoformat()
-    cutoff    = (date.today() + timedelta(days=days_ahead)).isoformat()
+    today  = date.today().isoformat()
+    cutoff = (date.today() + timedelta(days=days_ahead)).isoformat()
     with Session(engine) as session:
         rows = (
             session.query(FollowUp, Patient)
@@ -365,6 +513,10 @@ def get_pending_followups(days_ahead: int = 30) -> pd.DataFrame:
         )
     records = []
     for f, p in rows:
+        with Session(engine) as s2:
+            latest_a = s2.query(Assessment).filter(
+                Assessment.patient_id == p.id
+            ).order_by(Assessment.created_at.desc()).first()
         overdue = f.scheduled_date < today
         records.append({
             "followup_id":    f.id,
@@ -372,8 +524,8 @@ def get_pending_followups(days_ahead: int = 30) -> pd.DataFrame:
             "hn":             p.hn,
             "name":           p.name,
             "scheduled_date": f.scheduled_date,
-            "risk_level":     p.risk_level,
-            "risk_prob":      p.risk_prob,
+            "risk_level":     latest_a.risk_level if latest_a else None,
+            "risk_prob":      latest_a.risk_prob if latest_a else None,
             "note":           f.note,
             "overdue":        overdue,
         })
@@ -388,11 +540,12 @@ def get_followup_stats() -> dict:
         missed    = session.query(FollowUp).filter(FollowUp.status == "missed").count()
         pending   = session.query(FollowUp).filter(FollowUp.status == "scheduled").count()
 
-        # เปรียบ prediction เดิม vs actual_outcome จริง
         rows = (
-            session.query(FollowUp.actual_outcome, Patient.prediction)
+            session.query(FollowUp.actual_outcome, Assessment.prediction)
             .join(Patient, FollowUp.patient_id == Patient.id)
+            .join(Assessment, Assessment.patient_id == Patient.id)
             .filter(FollowUp.actual_outcome.isnot(None))
+            .distinct()
             .all()
         )
 
@@ -425,17 +578,24 @@ def get_confirmed_followups() -> pd.DataFrame:
 
     records = []
     for f, p in rows:
+        with Session(engine) as s2:
+            a = s2.query(Assessment).filter(
+                Assessment.patient_id == p.id,
+                Assessment.disease == "diabetes"
+            ).order_by(Assessment.created_at.desc()).first()
+        if not a:
+            continue
         records.append({
-            "Pregnancies":       p.pregnancies or 0,
-            "Glucose":           f.glucose_new  if f.glucose_new  else (p.glucose or 0),
-            "BloodPressure":     p.blood_pressure or 0,
-            "SkinThickness":     p.skin_thickness or 0,
-            "Insulin":           p.insulin or 0,
-            "BMI":               f.bmi_new if f.bmi_new else (p.bmi or 0),
-            "DiabetesPedigree":  p.diabetes_pedigree or 0,
-            "Age":               p.age or 0,
-            "Outcome":           int(f.actual_outcome),
-            "source":            "followup",
+            "Pregnancies":      a.pregnancies or 0,
+            "Glucose":          f.glucose_new if f.glucose_new else (a.glucose or 0),
+            "BloodPressure":    a.blood_pressure or 0,
+            "SkinThickness":    a.skin_thickness or 0,
+            "Insulin":          a.insulin or 0,
+            "BMI":              f.bmi_new if f.bmi_new else (a.bmi or 0),
+            "DiabetesPedigree": a.diabetes_pedigree or 0,
+            "Age":              p.age or 0,
+            "Outcome":          int(f.actual_outcome),
+            "source":           "followup",
         })
     return pd.DataFrame(records)
 

@@ -15,7 +15,9 @@ import warnings
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from database import (
-    init_db, save_patient, search_patients, get_patient_by_id, get_all_patients, seed_demo_data,
+    init_db, save_patient, get_or_create_patient, save_assessment,
+    search_patients, get_patient_by_id, get_all_patients, get_assessments_by_patient,
+    seed_demo_data,
     schedule_followup, complete_followup,
     get_followups_by_patient, get_pending_followups, get_followup_stats,
 )
@@ -268,9 +270,13 @@ with tab1:
                     bmi=field_values.get("BMI"),
                     diabetes_pedigree=field_values.get("DiabetesPedigree"),
                 )
-            row_id = save_patient(base)
+            patient_id    = get_or_create_patient(
+                hn=hn.strip() or None, name=name.strip(),
+                age=int(field_values.get(age_key, field_values.get("Age", 0))),
+            )
+            assessment_id = save_assessment(patient_id, base)
 
-            st.success(f"✅ บันทึกแล้ว (ID: {row_id})")
+            st.success(f"✅ บันทึกแล้ว (คนไข้ ID: {patient_id}, การประเมิน #{assessment_id})")
             st.markdown("---")
 
             # ผลประเมิน

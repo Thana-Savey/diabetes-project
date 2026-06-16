@@ -48,6 +48,10 @@ def admin_token(api_client):
 
 
 SAMPLE_PATIENT = {
+    "hn": "HN-TEST",
+    "name": "Test Patient",
+    "age": 45,
+    "disease": "diabetes",
     "pregnancies": 2,
     "glucose": 148,
     "blood_pressure": 72,
@@ -55,5 +59,4 @@ SAMPLE_PATIENT = {
     "insulin": 0,
     "bmi": 33.6,
     "diabetes_pedigree": 0.627,
-    "age": 50,
 }

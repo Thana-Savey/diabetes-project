@@ -4,6 +4,7 @@ test_database.py — ทดสอบ database CRUD functions
 import pytest
 from database import (
     save_patient, get_patient_by_id, get_all_patients, search_patients,
+    get_or_create_patient, save_assessment, get_assessments_by_patient,
     schedule_followup, complete_followup,
     get_followups_by_patient, get_pending_followups, get_followup_stats,
     get_confirmed_followups, log_action, get_audit_logs,
@@ -15,6 +16,7 @@ class TestPatient:
     def test_save_and_retrieve_patient(self):
         pid = save_patient({
             "hn": "TEST-001", "name": "ทดสอบ ระบบ", "age": 40,
+            "disease": "diabetes",
             "pregnancies": 1, "glucose": 130, "blood_pressure": 75,
             "skin_thickness": 25, "insulin": 0, "bmi": 28.5,
             "diabetes_pedigree": 0.4,
@@ -35,6 +37,7 @@ class TestPatient:
     def test_search_by_name(self):
         save_patient({
             "name": "ค้นหา ทดสอบ", "age": 35,
+            "disease": "diabetes",
             "risk_prob": 0.3, "risk_level": "ต่ำ", "prediction": 0,
         })
         df = search_patients("ค้นหา")
@@ -44,6 +47,7 @@ class TestPatient:
     def test_search_by_hn(self):
         save_patient({
             "hn": "HN-SEARCH", "name": "ทดสอบ HN", "age": 50,
+            "disease": "diabetes",
             "risk_prob": 0.8, "risk_level": "สูง", "prediction": 1,
         })
         df = search_patients("HN-SEARCH")
@@ -55,6 +59,45 @@ class TestPatient:
         assert "name" in df.columns
         assert "risk_level" in df.columns
 
+    def test_get_assessments_by_patient(self):
+        pid = save_patient({
+            "name": "ทดสอบ Assessment", "age": 44, "disease": "diabetes",
+            "glucose": 150, "bmi": 30.0,
+            "risk_prob": 0.7, "risk_level": "สูง", "prediction": 1,
+        })
+        df = get_assessments_by_patient(pid)
+        assert not df.empty
+        assert "disease" in df.columns
+        assert "risk_prob" in df.columns
+        assert len(df) >= 1
+
+    def test_patient_has_multiple_assessments(self):
+        # Create patient with HN so get_or_create returns same patient_id
+        pid = get_or_create_patient(hn="HN-MULTI", name="Multi Disease", age=50)
+        # Add two assessments for different diseases
+        save_assessment(pid, {
+            "disease": "diabetes",
+            "glucose": 148, "bmi": 33.6,
+            "risk_prob": 0.82, "risk_level": "สูง", "prediction": 1,
+        })
+        save_assessment(pid, {
+            "disease": "heart",
+            "features_json": '{"chol": 240}',
+            "risk_prob": 0.45, "risk_level": "กลาง", "prediction": 0,
+        })
+        df = get_assessments_by_patient(pid)
+        assert len(df) >= 2
+        diseases_in_df = df["disease"].tolist()
+        assert "diabetes" in diseases_in_df
+        assert "heart" in diseases_in_df
+
+        # get_patient_by_id should return merged dict with latest assessment data
+        p = get_patient_by_id(pid)
+        assert p is not None
+        assert p["name"] == "Multi Disease"
+        assert "risk_prob" in p
+        assert "disease" in p
+
 
 # ── Follow-up CRUD ─────────────────────────────────────────────
 class TestFollowUp:
@@ -62,6 +105,7 @@ class TestFollowUp:
     def patient_id(self):
         return save_patient({
             "hn": "FU-TEST", "name": "Follow-up ทดสอบ", "age": 45,
+            "disease": "diabetes",
             "glucose": 140, "bmi": 31.0,
             "risk_prob": 0.75, "risk_level": "สูง", "prediction": 1,
         })
