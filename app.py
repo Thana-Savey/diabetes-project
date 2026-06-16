@@ -99,8 +99,12 @@ def shap_chart(df_raw, df_scaled):
     sv_row = shap_values[1][0] if isinstance(shap_values, list) else shap_values[0]
     order  = np.argsort(np.abs(sv_row))[::-1]
 
-    feat_labels = [f"{FEATURE_NAMES[i]} = {df_raw[FEATURE_NAMES[i]].values[0]:.1f}"
-                   for i in order]
+    feat_labels = [
+        f"{FEATURE_NAMES[i]} = {float(df_raw[FEATURE_NAMES[i]].values[0]):.1f}"
+        if df_raw[FEATURE_NAMES[i]].values[0] is not None
+        else f"{FEATURE_NAMES[i]} = N/A"
+        for i in order
+    ]
     shap_sorted = sv_row[order]
     bar_colors  = ["#D85A30" if v > 0 else "#1D9E75" for v in shap_sorted]
 
@@ -342,11 +346,13 @@ with tab2:
         if st.button("📊 ดูผลและ SHAP", type="primary"):
             p = get_patient_by_id(selected_id)
             if p:
+                def _v(val, default=0):
+                    return val if val is not None else default
                 raw = dict(
-                    Pregnancies=p["pregnancies"], Glucose=p["glucose"],
-                    BloodPressure=p["blood_pressure"], SkinThickness=p["skin_thickness"],
-                    Insulin=p["insulin"], BMI=p["bmi"],
-                    DiabetesPedigree=p["diabetes_pedigree"], Age=p["age"],
+                    Pregnancies=_v(p["pregnancies"]), Glucose=_v(p["glucose"]),
+                    BloodPressure=_v(p["blood_pressure"]), SkinThickness=_v(p["skin_thickness"]),
+                    Insulin=_v(p["insulin"]), BMI=_v(p["bmi"]),
+                    DiabetesPedigree=_v(p["diabetes_pedigree"], 0.5), Age=_v(p["age"], 30),
                 )
                 df_raw, df_scaled = preprocess(raw)
                 shap_vals = explainer.shap_values(df_scaled)
