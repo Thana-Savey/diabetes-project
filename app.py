@@ -230,11 +230,17 @@ with tab1:
             pred  = int(prob >= 0.5)
             rlevel = get_risk_level(prob)
 
-            # บันทึกลง DB (diabetes fields เท่านั้น ถ้าเป็นโรคอื่นเก็บใน note)
+            # ── บันทึกลง DB ────────────────────────────────────────
+            age_key = "Age" if selected_disease == "diabetes" else "age"
+            base = dict(
+                hn=hn.strip() or None, name=name.strip(),
+                age=int(field_values.get(age_key, field_values.get("Age", 0))),
+                disease=selected_disease,
+                risk_prob=round(prob, 4), risk_level=rlevel,
+                prediction=pred, note=note.strip(),
+            )
             if selected_disease == "diabetes":
-                row_id = save_patient(dict(
-                    hn=hn.strip() or None, name=name.strip(),
-                    age=int(field_values.get("Age", 0)),
+                base.update(
                     pregnancies=field_values.get("Pregnancies"),
                     glucose=field_values.get("Glucose"),
                     blood_pressure=field_values.get("BloodPressure"),
@@ -242,18 +248,8 @@ with tab1:
                     insulin=field_values.get("Insulin"),
                     bmi=field_values.get("BMI"),
                     diabetes_pedigree=field_values.get("DiabetesPedigree"),
-                    risk_prob=round(prob, 4), risk_level=rlevel,
-                    prediction=pred,
-                    note=note.strip(),
-                ))
-            else:
-                row_id = save_patient(dict(
-                    hn=hn.strip() or None, name=name.strip(),
-                    age=int(field_values.get("age", 0)),
-                    risk_prob=round(prob, 4), risk_level=rlevel,
-                    prediction=pred,
-                    note=f"[{disease_cfg['name_th']}] {note.strip()}",
-                ))
+                )
+            row_id = save_patient(base)
 
             st.success(f"✅ บันทึกแล้ว (ID: {row_id})")
             st.markdown("---")
@@ -315,16 +311,44 @@ with tab2:
     if results.empty:
         st.info("ไม่พบข้อมูลคนไข้")
     else:
-        # แสดงตารางพร้อม badge
-        display = results.copy()
-        display["risk_prob"] = display["risk_prob"].apply(lambda x: f"{x:.1%}")
+        def _disease_label(row) -> str:
+            key  = row.get("disease") or ""
+            note = row.get("note") or ""
+            if not key and note.startswith("[") and "]" in note:
+                # backward compat: parse from note e.g. "[โรคหลอดเลือดสมอง] ..."
+                label = note[1:note.index("]")]
+                for k, cfg in DISEASES.items():
+                    if cfg["name_th"] == label:
+                        return f"{cfg['icon']} {cfg['name_th']}"
+                return f"❓ {label}"
+            cfg = DISEASES.get(key)
+            return f"{cfg['icon']} {cfg['name_th']}" if cfg else "🩸 เบาหวาน"
+
+        def _key_value(row) -> str:
+            key = row.get("disease") or "diabetes"
+            if key == "diabetes":
+                g = row.get("glucose")
+                b = row.get("bmi")
+                parts = []
+                if g is not None: parts.append(f"Glucose {int(g)}")
+                if b is not None: parts.append(f"BMI {float(b):.1f}")
+                return " / ".join(parts) if parts else "—"
+            return "—"
+
+        display = results[["id","hn","name","age","disease","glucose","bmi",
+                            "risk_prob","risk_level","prediction","note","created_at"]].copy()
+        display["disease"]    = display.apply(_disease_label, axis=1)
+        display["key_value"]  = display.apply(_key_value, axis=1)
+        display["risk_prob"]  = display["risk_prob"].apply(lambda x: f"{x:.1%}")
         display["prediction"] = display["prediction"].apply(
             lambda x: "✅ ไม่เสี่ยง" if x == 0 else "⚠️ เสี่ยง"
         )
-        display.columns = ["ID", "HN", "ชื่อ", "อายุ", "Glucose", "BMI",
-                           "โอกาส", "ระดับ", "ผล", "วันที่"]
+        show = display[["id","hn","name","age","disease","key_value",
+                         "risk_prob","risk_level","prediction","created_at"]]
+        show.columns = ["ID","HN","ชื่อ","อายุ","โรค","ค่าสำคัญ",
+                        "โอกาส","ระดับ","ผล","วันที่"]
 
-        st.dataframe(display, use_container_width=True, hide_index=True)
+        st.dataframe(show, use_container_width=True, hide_index=True)
         st.caption(f"พบ {len(results)} รายการ")
 
         # ── ดูรายละเอียด ───────────────────────────────────────

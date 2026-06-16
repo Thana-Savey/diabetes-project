@@ -52,6 +52,7 @@ class Patient(Base):
     insulin           = Column(Float)
     bmi               = Column(Float)
     diabetes_pedigree = Column(Float)
+    disease           = Column(String(50))   # disease key: "diabetes","heart","stroke", ...
     risk_prob         = Column(Float)
     risk_level        = Column(String(10))
     prediction        = Column(Integer)
@@ -98,10 +99,26 @@ class AuditLog(Base):
     detail      = Column(Text)
 
 
+# ── Migration helper ───────────────────────────────────────────
+def _add_col_if_missing(table: str, col: str, col_type: str) -> None:
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+            conn.commit()
+        except Exception:
+            pass  # column already exists
+
+
 # ── Init ───────────────────────────────────────────────────────
 def init_db():
-    """สร้างตารางทั้งหมดถ้ายังไม่มี (ใช้ได้ทั้ง SQLite และ PostgreSQL)"""
+    """สร้างตารางทั้งหมดถ้ายังไม่มี และ migrate columns ใหม่"""
     Base.metadata.create_all(engine)
+    _migrate()
+
+
+def _migrate():
+    """เพิ่ม column ใหม่สำหรับ DB เก่าที่ยังไม่มี"""
+    _add_col_if_missing("patients", "disease", "VARCHAR(50)")
 
 
 # ── Audit Log ──────────────────────────────────────────────────
@@ -186,7 +203,7 @@ def get_audit_summary() -> dict:
 def save_patient(data: dict) -> int:
     with Session(engine) as session:
         p = Patient(**{k: data.get(k) for k in [
-            "hn","name","age","pregnancies","glucose","blood_pressure",
+            "hn","name","age","disease","pregnancies","glucose","blood_pressure",
             "skin_thickness","insulin","bmi","diabetes_pedigree",
             "risk_prob","risk_level","prediction","note"
         ]})
@@ -220,11 +237,23 @@ def get_all_patients() -> pd.DataFrame:
 
 
 def _patients_to_df(rows) -> pd.DataFrame:
+    def _disease(r):
+        # backward compat: old rows have disease=None → parse from note or default diabetes
+        if getattr(r, "disease", None):
+            return r.disease
+        note = r.note or ""
+        if note.startswith("[") and "]" in note:
+            # format "[โรคหลอดเลือดสมอง] ..."
+            return None   # keep None, resolved to label in app.py
+        return "diabetes"
+
     return pd.DataFrame([{
         "id": r.id, "hn": r.hn, "name": r.name, "age": r.age,
+        "disease": _disease(r),
         "glucose": r.glucose, "bmi": r.bmi,
         "risk_prob": r.risk_prob, "risk_level": r.risk_level,
         "prediction": r.prediction,
+        "note": r.note,
         "created_at": r.created_at,
     } for r in rows])
 
