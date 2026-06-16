@@ -6,6 +6,7 @@ Diabetes Risk Prediction App
 import streamlit as st
 import pandas as pd
 import numpy as np
+import json
 from datetime import datetime
 import matplotlib.pyplot as plt
 import lightgbm as lgb
@@ -23,6 +24,17 @@ from diseases import DISEASES
 from multimodel import load_all_models, preprocess_input, risk_level as get_risk_level
 
 warnings.filterwarnings("ignore")
+
+# ── ค่าสำคัญที่แสดงในตารางสำหรับแต่ละโรค ──────────────────────
+# [(feature_key, label, format_str), ...]
+DISEASE_KEY_DISPLAY: dict[str, list] = {
+    "diabetes":     [("Glucose", "Glucose", ".0f"), ("BMI", "BMI", ".1f")],
+    "heart":        [("chol", "Chol", ".0f"), ("thalach", "HR max", ".0f")],
+    "stroke":       [("avg_glucose_level", "Glucose", ".0f"), ("bmi", "BMI", ".1f")],
+    "breast_cancer":[("mean_radius", "Radius", ".1f"), ("mean_area", "Area", ".0f")],
+    "liver":        [("Total_Bilirubin", "Bilirubin", ".1f"), ("Alamine_Aminotransferase", "ALT", ".0f")],
+    "ckd":          [("sc", "Creatinine", ".1f"), ("hemo", "Hemoglobin", ".1f")],
+}
 
 # ── Init DB ────────────────────────────────────────────────────
 init_db()
@@ -232,10 +244,17 @@ with tab1:
 
             # ── บันทึกลง DB ────────────────────────────────────────
             age_key = "Age" if selected_disease == "diabetes" else "age"
+
+            # เก็บ key features ทุกโรคเป็น JSON
+            key_fields = DISEASE_KEY_DISPLAY.get(selected_disease, [])
+            kv = {f: field_values[f] for f, *_ in key_fields if f in field_values}
+            features_json = json.dumps(kv) if kv else None
+
             base = dict(
                 hn=hn.strip() or None, name=name.strip(),
                 age=int(field_values.get(age_key, field_values.get("Age", 0))),
                 disease=selected_disease,
+                features_json=features_json,
                 risk_prob=round(prob, 4), risk_level=rlevel,
                 prediction=pred, note=note.strip(),
             )
@@ -325,17 +344,24 @@ with tab2:
             return f"{cfg['icon']} {cfg['name_th']}" if cfg else "🩸 เบาหวาน"
 
         def _key_value(row) -> str:
-            key = row.get("disease") or "diabetes"
-            if key == "diabetes":
-                g = row.get("glucose")
-                b = row.get("bmi")
-                parts = []
-                if g is not None: parts.append(f"Glucose {int(g)}")
-                if b is not None: parts.append(f"BMI {float(b):.1f}")
-                return " / ".join(parts) if parts else "—"
-            return "—"
+            key      = row.get("disease") or "diabetes"
+            fj       = row.get("features_json")
+            stored   = json.loads(fj) if fj else {}
+            # fallback: diabetes legacy columns
+            if key == "diabetes" and not stored:
+                if row.get("glucose") is not None:
+                    stored["Glucose"] = row["glucose"]
+                if row.get("bmi") is not None:
+                    stored["BMI"] = row["bmi"]
+            display_cfg = DISEASE_KEY_DISPLAY.get(key, [])
+            parts = []
+            for feat, label, fmt in display_cfg:
+                v = stored.get(feat)
+                if v is not None:
+                    parts.append(f"{label} {float(v):{fmt}}")
+            return " / ".join(parts) if parts else "—"
 
-        display = results[["id","hn","name","age","disease","glucose","bmi",
+        display = results[["id","hn","name","age","disease","features_json","glucose","bmi",
                             "risk_prob","risk_level","prediction","note","created_at"]].copy()
         display["disease"]    = display.apply(_disease_label, axis=1)
         display["key_value"]  = display.apply(_key_value, axis=1)

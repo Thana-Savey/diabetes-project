@@ -53,6 +53,7 @@ class Patient(Base):
     bmi               = Column(Float)
     diabetes_pedigree = Column(Float)
     disease           = Column(String(50))   # disease key: "diabetes","heart","stroke", ...
+    features_json     = Column(Text)         # JSON: {"key": value, ...} ค่าสำคัญของแต่ละโรค
     risk_prob         = Column(Float)
     risk_level        = Column(String(10))
     prediction        = Column(Integer)
@@ -118,7 +119,8 @@ def init_db():
 
 def _migrate():
     """เพิ่ม column ใหม่สำหรับ DB เก่าที่ยังไม่มี"""
-    _add_col_if_missing("patients", "disease", "VARCHAR(50)")
+    _add_col_if_missing("patients", "disease",       "VARCHAR(50)")
+    _add_col_if_missing("patients", "features_json", "TEXT")
 
 
 # ── Audit Log ──────────────────────────────────────────────────
@@ -203,8 +205,8 @@ def get_audit_summary() -> dict:
 def save_patient(data: dict) -> int:
     with Session(engine) as session:
         p = Patient(**{k: data.get(k) for k in [
-            "hn","name","age","disease","pregnancies","glucose","blood_pressure",
-            "skin_thickness","insulin","bmi","diabetes_pedigree",
+            "hn","name","age","disease","features_json","pregnancies","glucose",
+            "blood_pressure","skin_thickness","insulin","bmi","diabetes_pedigree",
             "risk_prob","risk_level","prediction","note"
         ]})
         session.add(p)
@@ -249,12 +251,15 @@ def _patients_to_df(rows) -> pd.DataFrame:
 
     return pd.DataFrame([{
         "id": r.id, "hn": r.hn, "name": r.name, "age": r.age,
-        "disease": _disease(r),
-        "glucose": r.glucose, "bmi": r.bmi,
-        "risk_prob": r.risk_prob, "risk_level": r.risk_level,
-        "prediction": r.prediction,
-        "note": r.note,
-        "created_at": r.created_at,
+        "disease":       _disease(r),
+        "features_json": getattr(r, "features_json", None),
+        "glucose":       r.glucose,
+        "bmi":           r.bmi,
+        "risk_prob":     r.risk_prob,
+        "risk_level":    r.risk_level,
+        "prediction":    r.prediction,
+        "note":          r.note,
+        "created_at":    r.created_at,
     } for r in rows])
 
 
